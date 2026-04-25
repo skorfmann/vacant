@@ -27,6 +27,7 @@ vacant --tld com,io,dev,sh acme          # expand a bare name across TLDs
 vacant --file names.txt                  # newline-separated list
 cat names.txt | vacant --file -          # stdin
 vacant --dns --json --file names.txt     # bulk + DNS pre-filter + machine output
+vacant --aftermarket --tld com acme      # detect taken-but-for-sale domains
 ```
 
 Run `vacant --help` for the full reference (flags, status values, exit codes, JSON schema).
@@ -38,6 +39,7 @@ Human-readable by default:
 ```
 ✓ acme.dev                       available
 ✗ google.com                     taken
+$ solutions.com                  for-sale  Atom
 ! acme.es                        error  connection refused
 ```
 
@@ -46,6 +48,7 @@ NDJSON with `--json`:
 ```json
 {"domain":"acme.dev","status":"available","server":"https://pubapi.registry.google/rdap"}
 {"domain":"google.com","status":"taken","server":"dns"}
+{"domain":"solutions.com","status":"for-sale","server":"dns","marketplace":"Atom"}
 ```
 
 ## How it works
@@ -56,6 +59,8 @@ Three lookup tiers. The first one to give a definite answer wins.
 2. **RDAP.** Looks up the authoritative RDAP server for the TLD via the IANA bootstrap file (`https://data.iana.org/rdap/dns.json`, cached on disk for 24h), then queries `GET {base}/domain/{name}`. `200` = taken, `404` = available.
 3. **WHOIS fallback.** For TLDs without RDAP (`.es`, `.eu`, `.jp`, `.co`, and ~185 others), discovers the authoritative WHOIS server via `whois.iana.org` and queries it on port 43. The response is parsed heuristically for availability markers ("no match", "not found", "status: free", etc.).
 
+**Aftermarket detection (optional, `--aftermarket`).** After a domain is determined to be `taken`, its NS records are matched against a list of known parking nameservers (Sedo, Dan, Afternic, ParkingCrew, Bodis, HugeDomains, Atom, etc.). A match upgrades the status to `for-sale` and surfaces the marketplace. Free signal — no API key. Pairs naturally with `--dns`, since the NS lookup is shared.
+
 WHOIS connections are capped at 2 concurrent per registry host to stay within typical rate limits — the `--concurrency` flag governs the overall worker pool, not per-host throttling.
 
 ## For agents
@@ -64,12 +69,13 @@ WHOIS connections are capped at 2 concurrent per registry host to stay within ty
 
 **JSON schema (one object per line):**
 
-| Field    | Type   | Notes                                                                |
-| -------- | ------ | -------------------------------------------------------------------- |
-| `domain` | string | The queried domain, lowercased.                                      |
-| `status` | string | `available` \| `taken` \| `error` \| `unknown`.                      |
-| `server` | string | Source that answered: `dns`, an RDAP URL, or a WHOIS hostname.       |
-| `error`  | string | Present only when `status=error`. Human-readable error message.      |
+| Field         | Type   | Notes                                                                |
+| ------------- | ------ | -------------------------------------------------------------------- |
+| `domain`      | string | The queried domain, lowercased.                                      |
+| `status`      | string | `available` \| `taken` \| `for-sale` \| `error` \| `unknown`.        |
+| `server`      | string | Source that answered: `dns`, an RDAP URL, or a WHOIS hostname.       |
+| `marketplace` | string | Present only when `status=for-sale`. Detected parking service.       |
+| `error`       | string | Present only when `status=error`. Human-readable error message.      |
 
 **Exit codes:**
 
@@ -93,8 +99,9 @@ The exit code reflects the batch as a whole. For per-domain decisions, parse `st
 ```
 main.go        flag parsing, worker pool, output formatting
 bootstrap.go   IANA RDAP bootstrap fetch, cache, TLD -> server lookup
-check.go       per-domain orchestration (DNS -> RDAP -> WHOIS)
+check.go       per-domain orchestration (DNS -> RDAP -> WHOIS, aftermarket)
 rdap.go        RDAP HTTPS query (in check.go)
 whois.go       WHOIS port-43 query, IANA discovery, per-host limiter, parser
 dns.go         DoH NS query against Cloudflare 1.1.1.1
+parking.go     known parking-nameserver list and marketplace detection
 ```

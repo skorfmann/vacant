@@ -15,6 +15,7 @@ const (
 	statusUnknown status = iota
 	statusAvailable
 	statusTaken
+	statusForSale
 	statusError
 )
 
@@ -24,6 +25,8 @@ func (s status) String() string {
 		return "available"
 	case statusTaken:
 		return "taken"
+	case statusForSale:
+		return "for-sale"
 	case statusError:
 		return "error"
 	default:
@@ -32,24 +35,51 @@ func (s status) String() string {
 }
 
 type result struct {
-	Domain string `json:"domain"`
-	Status string `json:"status"`
-	Server string `json:"server,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Domain      string `json:"domain"`
+	Status      string `json:"status"`
+	Server      string `json:"server,omitempty"`
+	Marketplace string `json:"marketplace,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
-func checkDomain(ctx context.Context, client *http.Client, reg *registry, domain string, dnsPrefilter bool) result {
+type checkOpts struct {
+	dnsPrefilter bool
+	aftermarket  bool
+}
+
+func checkDomain(ctx context.Context, client *http.Client, reg *registry, domain string, opts checkOpts) result {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	res := result{Domain: domain}
 
-	if dnsPrefilter {
-		if has, err := dnsHasNS(ctx, client, domain); err == nil && has {
-			res.Status = statusTaken.String()
-			res.Server = "dns"
-			return res
+	var nsRecords []string
+	nsFetched := false
+
+	if opts.dnsPrefilter {
+		ns, err := dnsLookupNS(ctx, client, domain)
+		if err == nil {
+			nsRecords = ns
+			nsFetched = true
+			if len(ns) > 0 {
+				res.Status = statusTaken.String()
+				res.Server = "dns"
+				applyAftermarket(&res, opts, ns)
+				return res
+			}
 		}
 	}
 
+	resolveStatus(ctx, client, reg, domain, &res)
+
+	if opts.aftermarket && res.Status == statusTaken.String() {
+		if !nsFetched {
+			nsRecords, _ = dnsLookupNS(ctx, client, domain)
+		}
+		applyAftermarket(&res, opts, nsRecords)
+	}
+	return res
+}
+
+func resolveStatus(ctx context.Context, client *http.Client, reg *registry, domain string, res *result) {
 	servers, err := reg.lookup(domain)
 	if err != nil {
 		if errors.Is(err, errNoRDAPServer) {
@@ -59,11 +89,11 @@ func checkDomain(ctx context.Context, client *http.Client, reg *registry, domain
 			if werr != nil {
 				res.Error = werr.Error()
 			}
-			return res
+			return
 		}
 		res.Status = statusError.String()
 		res.Error = err.Error()
-		return res
+		return
 	}
 
 	var lastErr error
@@ -77,13 +107,22 @@ func checkDomain(ctx context.Context, client *http.Client, reg *registry, domain
 		}
 		res.Status = st.String()
 		res.Server = base
-		return res
+		return
 	}
 	res.Status = statusError.String()
 	if lastErr != nil {
 		res.Error = lastErr.Error()
 	}
-	return res
+}
+
+func applyAftermarket(res *result, opts checkOpts, ns []string) {
+	if !opts.aftermarket {
+		return
+	}
+	if mp := detectMarketplace(ns); mp != "" {
+		res.Status = statusForSale.String()
+		res.Marketplace = mp
+	}
 }
 
 func queryRDAP(ctx context.Context, client *http.Client, url string) (status, error) {

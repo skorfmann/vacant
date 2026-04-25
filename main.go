@@ -40,19 +40,26 @@ FLAGS
                          live NS records are reported as taken without an
                          RDAP/WHOIS round-trip. Faster for mostly-taken
                          batches; adds latency for mostly-available ones.
+      --aftermarket      Detect domains listed for resale by inspecting NS
+                         records for known parking nameservers (Sedo, Dan,
+                         Afternic, ParkingCrew, Bodis, etc.). Taken domains
+                         matching a known parker are reported as for-sale
+                         with a "marketplace" field. Free signal — no API
+                         key required. Pairs naturally with --dns.
       --json             Emit one JSON object per line on stdout (NDJSON).
       --no-color         Disable ANSI colors in human output.
 
 OUTPUT
   Human (default): one line per domain with a symbol, name, and status.
-    ✓ available   ✗ taken   ! error   ? unknown
+    ✓ available   ✗ taken   $ for-sale   ! error   ? unknown
 
   JSON (--json): one object per line, schema:
     {
-      "domain": "acme.dev",
-      "status": "available" | "taken" | "error" | "unknown",
-      "server": "<source that answered>",   // optional
-      "error":  "<error message>"           // present iff status=error
+      "domain":      "acme.dev",
+      "status":      "available" | "taken" | "for-sale" | "error" | "unknown",
+      "server":      "<source that answered>",         // optional
+      "marketplace": "<parking service>",              // present iff for-sale
+      "error":       "<error message>"                 // present iff error
     }
 
   The "server" field identifies which lookup path answered:
@@ -75,6 +82,9 @@ EXAMPLES
   Bulk check from file with DNS pre-filter and JSON output:
     vacant --file names.txt --dns --json
 
+  Find taken-but-buyable domains via parking-NS detection:
+    vacant --aftermarket --tld com,io shipmate launchpad
+
   Stdin pipe:
     cat names.txt | vacant --file -
 
@@ -92,6 +102,7 @@ type config struct {
 	jsonOut      bool
 	noColor      bool
 	dnsPrefilter bool
+	aftermarket  bool
 }
 
 func main() {
@@ -109,6 +120,7 @@ func main() {
 	fs.BoolVar(&cfg.jsonOut, "json", false, "")
 	fs.BoolVar(&cfg.noColor, "no-color", false, "")
 	fs.BoolVar(&cfg.dnsPrefilter, "dns", false, "")
+	fs.BoolVar(&cfg.aftermarket, "aftermarket", false, "")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -232,7 +244,10 @@ func run(ctx context.Context, cfg config, reg *registry, domains []string) int {
 		go func() {
 			defer wg.Done()
 			for d := range jobs {
-				results <- checkDomain(ctx, client, reg, d, cfg.dnsPrefilter)
+				results <- checkDomain(ctx, client, reg, d, checkOpts{
+					dnsPrefilter: cfg.dnsPrefilter,
+					aftermarket:  cfg.aftermarket,
+				})
 			}
 		}()
 	}
@@ -286,6 +301,8 @@ func printHuman(r result, noColor bool) {
 		sym, color = "✓", "\033[32m"
 	case statusTaken.String():
 		sym, color = "✗", "\033[31m"
+	case statusForSale.String():
+		sym, color = "$", "\033[36m"
 	case statusError.String():
 		sym, color = "!", "\033[33m"
 	default:
@@ -296,6 +313,9 @@ func printHuman(r result, noColor bool) {
 		color, reset = "", ""
 	}
 	line := fmt.Sprintf("%s%s %-30s %s%s", color, sym, r.Domain, r.Status, reset)
+	if r.Marketplace != "" {
+		line += "  " + r.Marketplace
+	}
 	if r.Error != "" {
 		line += "  " + r.Error
 	}

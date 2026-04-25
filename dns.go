@@ -19,40 +19,41 @@ type dohResponse struct {
 	} `json:"Answer"`
 }
 
-// dnsHasNS returns true only when DoH definitively reports NS records for
-// the domain. NXDOMAIN, empty answers, and errors all return false because
-// they're inconclusive — a registered-but-undelegated domain has no NS yet.
-func dnsHasNS(ctx context.Context, client *http.Client, domain string) (bool, error) {
+// dnsLookupNS returns NS record values for a domain via DoH. NXDOMAIN and
+// empty answers return (nil, nil) — registered-but-undelegated domains have
+// no NS, so absence is inconclusive for availability.
+func dnsLookupNS(ctx context.Context, client *http.Client, domain string) ([]string, error) {
 	q := url.Values{}
 	q.Set("name", domain)
 	q.Set("type", "NS")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dohURL+"?"+q.Encode(), nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/dns-json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("doh status %d", resp.StatusCode)
+		return nil, fmt.Errorf("doh status %d", resp.StatusCode)
 	}
 
 	var dr dohResponse
 	if err := json.NewDecoder(resp.Body).Decode(&dr); err != nil {
-		return false, err
+		return nil, err
 	}
 	if dr.Status != 0 {
-		return false, nil
+		return nil, nil
 	}
+	var out []string
 	for _, a := range dr.Answer {
 		if a.Type == 2 && a.Data != "" {
-			return true, nil
+			out = append(out, a.Data)
 		}
 	}
-	return false, nil
+	return out, nil
 }
